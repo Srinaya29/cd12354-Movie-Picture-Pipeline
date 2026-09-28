@@ -1,0 +1,144 @@
+name: Frontend Continuous Deployment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'starter/frontend/**'
+      - '.github/workflows/frontend-cd.yaml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO: frontend
+  EKS_CLUSTER: cluster
+
+jobs:
+  lint:
+    name: Check code style
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/frontend
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      - name: Set up Node from .nvmrc
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+
+      - name: Restore npm download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: fe-npm-${{ runner.os }}-${{ hashFiles('starter/frontend/package-lock.json') }}
+          restore-keys: fe-npm-${{ runner.os }}-
+
+      - name: Install packages
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/frontend
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      - name: Set up Node from .nvmrc
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+
+      - name: Restore npm download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: fe-npm-${{ runner.os }}-${{ hashFiles('starter/frontend/package-lock.json') }}
+          restore-keys: fe-npm-${{ runner.os }}-
+
+      - name: Install packages
+        run: npm ci
+
+      - name: Run Jest tests
+        env:
+          CI: 'true'
+        run: npm test
+
+  build-and-push:
+    name: Build image and push to ECR
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Find the backend address
+        id: backend
+        run: |
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+          HOST=$(kubectl get svc backend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          if [ -z "$HOST" ]; then
+            echo "Backend has no load balancer yet. Deploy the backend first."
+            exit 1
+          fi
+          echo "url=http://$HOST" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the image
+        id: publish
+        working-directory: starter/frontend
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          API_URL: ${{ steps.backend.outputs.url }}
+        run: |
+          docker build \
+            --build-arg REACT_APP_MOVIE_API_URL="$API_URL" \
+            --tag "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to EKS
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connect kubectl to the cluster
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Set image with kustomize and apply
+        working-directory: starter/frontend/k8s
+        run: |
+          kustomize edit set image frontend=${{ needs.build-and-push.outputs.image }}
+          kustomize build | kubectl apply -f -
+          kubectl rollout status deployment/frontend --timeout=300s
+          kubectl get svc frontend
