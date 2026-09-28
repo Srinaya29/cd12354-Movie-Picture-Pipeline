@@ -1,0 +1,100 @@
+name: Frontend Continuous Integration
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'starter/frontend/**'
+      - '.github/workflows/frontend-ci.yaml'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: starter/frontend
+
+jobs:
+  lint:
+    name: Check code style
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      - name: Set up Node from .nvmrc
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+
+      - name: Restore npm download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: fe-npm-${{ runner.os }}-${{ hashFiles('starter/frontend/package-lock.json') }}
+          restore-keys: fe-npm-${{ runner.os }}-
+
+      - name: Install packages
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      - name: Set up Node from .nvmrc
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+
+      - name: Restore npm download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: fe-npm-${{ runner.os }}-${{ hashFiles('starter/frontend/package-lock.json') }}
+          restore-keys: fe-npm-${{ runner.os }}-
+
+      - name: Install packages
+        run: npm ci
+
+      - name: Run Jest tests
+        env:
+          CI: 'true'
+        run: npm test
+
+  build:
+    name: Build docker image
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      - name: Set up Node from .nvmrc
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+
+      - name: Restore npm download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: fe-npm-${{ runner.os }}-${{ hashFiles('starter/frontend/package-lock.json') }}
+          restore-keys: fe-npm-${{ runner.os }}-
+
+      - name: Install packages
+        run: npm ci
+
+      - name: Run Jest tests
+        env:
+          CI: 'true'
+        run: npm test
+
+      - name: Build the image
+        run: |
+          docker build \
+            --build-arg REACT_APP_MOVIE_API_URL=http://localhost:5000 \
+            --tag movie-frontend:${{ github.sha }} .
